@@ -18,7 +18,7 @@ class PCB:
     priority: int = 0
     
     # Dynamic state
-    remaining_cpu_time: int = -1  # Initialized dynamically in __post_init__
+    remaining_cpu_time: int = -1
     state: ProcessState = ProcessState.NEW
     
     # Tracking metrics
@@ -32,21 +32,28 @@ class PCB:
 
     @property
     def response_time(self) -> Optional[int]:
-        """Time from arrival to first execution."""
         if self.start_time is None:
             return None
         return self.start_time - self.arrival_time
 
     @property
     def turnaround_time(self) -> Optional[int]:
-        """Total time from arrival to completion."""
         if self.completion_time is None:
             return None
         return self.completion_time - self.arrival_time
 
     @property
     def waiting_time(self) -> Optional[int]:
-        """Total time spent waiting in the ready queue."""
         if self.turnaround_time is None:
             return None
         return self.turnaround_time - self.cpu_burst_time
+
+# --- NEW ADDITION FOR PHASE 2 ---
+@dataclass
+class TimelineEvent:
+    start_time: int
+    end_time: int
+    pid: int
+    
+    def __str__(self):
+        return f"[{self.start_time}-{self.end_time}] PID:{self.pid}"
