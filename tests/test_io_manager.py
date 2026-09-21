@@ -7,8 +7,8 @@ class TestIOManager(unittest.TestCase):
     def setUp(self):
         self.manager = IOManager()
 
-    def test_submit_request_and_start_time(self):
-        """Verify submitting a request records the start time and tracks it as active."""
+    def test_submit_first_request_starts_immediately(self):
+        """Verify the first request on a device gets an immediate start time."""
         req = IORequest(process_id=1, device=IODevice.DISK, duration=3)
         self.manager.submit_request(req)
         
@@ -16,85 +16,98 @@ class TestIOManager(unittest.TestCase):
         self.assertIn(req, self.manager.get_active_requests())
         self.assertTrue(self.manager.has_active_io(1))
 
-    def test_advancing_simulation_time(self):
-        """Verify advancing time correctly updates the manager's clock and the request's remaining time."""
-        req = IORequest(process_id=2, device=IODevice.KEYBOARD, duration=3)
-        self.manager.submit_request(req)
+    def test_queue_progression_and_timing(self):
+        """Verify second request queues, has no start time, and starts exactly when first finishes."""
+        req_a = IORequest(process_id=1, device=IODevice.DISK, duration=2)
+        req_b = IORequest(process_id=2, device=IODevice.DISK, duration=1)
         
-        self.manager.advance_time()
+        self.manager.submit_request(req_a) # t=0
+        self.manager.submit_request(req_b) # t=0
         
-        self.assertEqual(self.manager.current_time, 1)
-        self.assertEqual(req.remaining_time, 2)
-        self.assertFalse(req.is_complete)
-        self.assertIn(req, self.manager.get_active_requests())
+        self.assertEqual(req_a.start_time, 0)
+        self.assertIsNone(req_b.start_time) # Queued requests shouldn't have a start time yet
+        
+        self.manager.advance_time() # t=1, A remaining=1
+        self.assertIsNone(req_b.start_time)
+        self.assertIn(req_a, self.manager.get_active_requests())
+        self.assertNotIn(req_b, self.manager.get_active_requests())
+        
+        self.manager.advance_time() # t=2, A completes, B starts automatically
+        
+        self.assertTrue(req_a.is_complete)
+        self.assertEqual(req_a.completion_time, 2)
+        
+        self.assertEqual(req_b.start_time, 2) # B must start at exactly t=2
+        self.assertIn(req_b, self.manager.get_active_requests())
+        
+        self.manager.advance_time() # t=3, B completes
+        self.assertTrue(req_b.is_complete)
+        self.assertEqual(req_b.completion_time, 3)
 
-    def test_request_completion_and_completion_time(self):
-        """Verify requests properly complete, record completion time, and move to completed tracking."""
-        req = IORequest(process_id=3, device=IODevice.NETWORK, duration=2)
-        self.manager.submit_request(req)
+    def test_fifo_ordering(self):
+        """Verify requests on the same device execute strictly in FIFO order."""
+        r1 = IORequest(process_id=1, device=IODevice.KEYBOARD, duration=1)
+        r2 = IORequest(process_id=2, device=IODevice.KEYBOARD, duration=1)
+        r3 = IORequest(process_id=3, device=IODevice.KEYBOARD, duration=1)
         
-        self.manager.advance_time() # t=1, remaining=1
-        self.assertFalse(req.is_complete)
-        
-        self.manager.advance_time() # t=2, remaining=0, complete!
-        
-        self.assertTrue(req.is_complete)
-        self.assertEqual(req.completion_time, 2)
-        
-        # Verify it was moved out of active and into completed
-        self.assertNotIn(req, self.manager.get_active_requests())
-        self.assertIn(req, self.manager.get_completed_requests())
-        self.assertFalse(self.manager.has_active_io(3))
-
-    def test_multiple_simultaneous_requests(self):
-        """Verify the manager can handle multiple requests progressing independently in parallel."""
-        req1 = IORequest(process_id=1, device=IODevice.DISK, duration=2)
-        req2 = IORequest(process_id=2, device=IODevice.PRINTER, duration=3)
-        
-        self.manager.submit_request(req1)
+        self.manager.submit_request(r1)
+        self.manager.submit_request(r2)
+        self.manager.submit_request(r3)
         
         self.manager.advance_time() # t=1
-        self.assertEqual(req1.remaining_time, 1)
+        self.assertTrue(r1.is_complete)
+        self.assertEqual(r2.start_time, 1)
+        self.assertIsNone(r3.start_time)
         
-        # Submit second request at t=1
-        self.manager.submit_request(req2)
-        self.assertEqual(req2.start_time, 1)
+        self.manager.advance_time() # t=2
+        self.assertTrue(r2.is_complete)
+        self.assertEqual(r3.start_time, 2)
+
+    def test_independent_devices(self):
+        """Verify requests on different devices execute concurrently."""
+        disk_req = IORequest(process_id=1, device=IODevice.DISK, duration=2)
+        net_req = IORequest(process_id=2, device=IODevice.NETWORK, duration=1)
+        
+        self.manager.submit_request(disk_req)
+        self.manager.submit_request(net_req)
+        
+        # Both start immediately because they request different devices
+        self.assertEqual(disk_req.start_time, 0)
+        self.assertEqual(net_req.start_time, 0)
         
         self.assertTrue(self.manager.has_active_io(1))
         self.assertTrue(self.manager.has_active_io(2))
         
+        self.manager.advance_time() # t=1
+        self.assertTrue(net_req.is_complete)
+        self.assertFalse(disk_req.is_complete)
+        
         self.manager.advance_time() # t=2
-        # req1 finishes, req2 has 2 left
-        self.assertTrue(req1.is_complete)
-        self.assertEqual(req1.completion_time, 2)
-        self.assertFalse(req2.is_complete)
-        
-        self.assertFalse(self.manager.has_active_io(1))
-        self.assertTrue(self.manager.has_active_io(2))
-        
-        self.manager.advance_time() # t=3, req2 remaining=1
-        self.manager.advance_time() # t=4, req2 finishes
-        
-        self.assertTrue(req2.is_complete)
-        self.assertEqual(req2.completion_time, 4)
-        
-        # Verify both are safely in the completed list
-        completed = self.manager.get_completed_requests()
-        self.assertEqual(len(completed), 2)
-        self.assertIn(req1, completed)
-        self.assertIn(req2, completed)
+        self.assertTrue(disk_req.is_complete)
 
-    def test_has_active_io_check(self):
-        """Verify the has_active_io method correctly returns process IO status."""
-        self.assertFalse(self.manager.has_active_io(5))
+    def test_pending_vs_active_io(self):
+        """Verify has_pending_io correctly identifies both queued and active requests."""
+        req_a = IORequest(process_id=10, device=IODevice.PRINTER, duration=2)
+        req_b = IORequest(process_id=20, device=IODevice.PRINTER, duration=2)
         
-        req = IORequest(process_id=5, device=IODevice.NETWORK, duration=1)
-        self.manager.submit_request(req)
+        self.manager.submit_request(req_a)
+        self.manager.submit_request(req_b)
         
-        self.assertTrue(self.manager.has_active_io(5))
+        # A is active (executing), B is pending (queued)
+        self.assertTrue(self.manager.has_active_io(10))
+        self.assertTrue(self.manager.has_pending_io(10))
         
-        self.manager.advance_time() # t=1, finishes
-        self.assertFalse(self.manager.has_active_io(5))
+        self.assertFalse(self.manager.has_active_io(20)) # Not executing yet
+        self.assertTrue(self.manager.has_pending_io(20)) # But is waiting in queue
+        
+        self.manager.advance_time() # t=1
+        self.manager.advance_time() # t=2, A finishes, B starts
+        
+        self.assertFalse(self.manager.has_active_io(10))
+        self.assertFalse(self.manager.has_pending_io(10))
+        
+        self.assertTrue(self.manager.has_active_io(20))
+        self.assertTrue(self.manager.has_pending_io(20))
 
 if __name__ == '__main__':
     unittest.main()
