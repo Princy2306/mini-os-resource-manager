@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 from models.pcb import PCB, ProcessState, TimelineEvent
 
 class BaseScheduler:
@@ -19,6 +19,13 @@ class BaseScheduler:
 
     def run(self) -> List[TimelineEvent]:
         raise NotImplementedError("Subclasses must implement run()")
+
+    def select_next_process(self, ready_processes: List[PCB], current_time: int) -> Optional[PCB]:
+        """
+        Incremental interface for the central OS Simulator.
+        Selects the next process to execute based on the scheduler's specific policy.
+        """
+        raise NotImplementedError("Subclasses must implement select_next_process()")
 
 
 class FCFSScheduler(BaseScheduler):
@@ -41,6 +48,12 @@ class FCFSScheduler(BaseScheduler):
             self.timeline.append(TimelineEvent(start, self.current_time, p.pid))
             
         return self.timeline
+
+    def select_next_process(self, ready_processes: List[PCB], current_time: int) -> Optional[PCB]:
+        if not ready_processes:
+            return None
+        # FCFS policy: earliest arrival time. Tie-breaker is PID.
+        return min(ready_processes, key=lambda p: (p.arrival_time, p.pid))
 
 
 class SJFScheduler(BaseScheduler):
@@ -76,6 +89,12 @@ class SJFScheduler(BaseScheduler):
             
         return self.timeline
 
+    def select_next_process(self, ready_processes: List[PCB], current_time: int) -> Optional[PCB]:
+        if not ready_processes:
+            return None
+        # SJF policy: shortest burst time, then earliest arrival
+        return min(ready_processes, key=lambda p: (p.cpu_burst_time, p.arrival_time, p.pid))
+
 
 class PriorityScheduler(BaseScheduler):
     def run(self) -> List[TimelineEvent]:
@@ -110,11 +129,22 @@ class PriorityScheduler(BaseScheduler):
             
         return self.timeline
 
+    def select_next_process(self, ready_processes: List[PCB], current_time: int) -> Optional[PCB]:
+        if not ready_processes:
+            return None
+        # Priority policy: lowest priority number, then earliest arrival
+        return min(ready_processes, key=lambda p: (p.priority, p.arrival_time, p.pid))
+
 
 class RoundRobinScheduler(BaseScheduler):
     def __init__(self, processes: List[PCB], quantum: int):
         super().__init__(processes)
         self.quantum = quantum
+        
+        # State tracking for the incremental select_next_process interface
+        self._internal_queue: List[PCB] = []
+        self._active_process: Optional[PCB] = None
+        self._current_slice: int = 0
 
     def run(self) -> List[TimelineEvent]:
         unstarted = sorted(self.processes, key=lambda p: p.arrival_time)
@@ -157,3 +187,35 @@ class RoundRobinScheduler(BaseScheduler):
                 completed += 1
                 
         return self.timeline
+
+    def select_next_process(self, ready_processes: List[PCB], current_time: int) -> Optional[PCB]:
+        # 1. Enqueue new arrivals (processes in ready_processes not seen yet)
+        for p in ready_processes:
+            if p not in self._internal_queue and p != self._active_process:
+                self._internal_queue.append(p)
+
+        # 2. Cleanup queue (remove processes no longer eligible, e.g., blocked/terminated externally)
+        self._internal_queue = [p for p in self._internal_queue if p in ready_processes or p == self._active_process]
+
+        # 3. Check if active process is preempted by quantum expiration or became ineligible
+        if self._active_process:
+            if self._active_process not in ready_processes:
+                # Process finished or went to I/O externally
+                self._active_process = None
+                self._current_slice = 0
+            elif self._current_slice >= self.quantum:
+                # Quantum expired -> Re-queue it and clear active process
+                self._internal_queue.append(self._active_process)
+                self._active_process = None
+                self._current_slice = 0
+
+        # 4. Pick next from internal queue if CPU is free
+        if not self._active_process and self._internal_queue:
+            self._active_process = self._internal_queue.pop(0)
+            self._current_slice = 0
+
+        # 5. If we have an active process, increment its slice (assumes called 1x per simulation tick)
+        if self._active_process:
+            self._current_slice += 1
+
+        return self._active_process
